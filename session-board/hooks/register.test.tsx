@@ -1249,6 +1249,41 @@ test('a turn the person interrupted is no finish to announce', async (...harness
   expect((await board.texts()).some(text => /작전 중지/.test(text))).toBe(true)
 })
 
+test('a VS Code session resumed only to write a background notice is back to its finish a minute on, with no banner', async (...harness) => {
+  const request = (timestamp: string) => ({ type: 'api-request', timestamp, querySource: 'sdk' })
+  const world = {
+    processes: '',
+    entries: [
+      { type: 'ai-title', aiTitle: '검수 화면 정리' },
+      { type: 'user', timestamp: '2026-10-13T07:00:00.000Z', turnOrigin: 'human', message: { content: '해줘' }, ...CODE },
+      request('2026-10-13T07:00:01.000Z'),
+      { type: 'assistant', timestamp: '2026-10-13T07:00:30.000Z', ...CODE, message: { stop_reason: 'end_turn', content: [{ type: 'text', text: '끝냈습니다' }] } },
+      { type: 'system', subtype: 'stop_hook_summary', timestamp: '2026-10-13T07:00:31.000Z' },
+    ] as object[],
+  }
+  const board = await boardOver(harness, STUDIO_PATH, NOW, world)
+  const isAtWork = async () => (await board.texts()).some(text => /열일 중/.test(text))
+
+  // The resume finds the command its process left running, writes its notice as a prompt, and
+  // the window closes before a request goes out.
+  world.entries.push({
+    type: 'user',
+    timestamp: '2026-10-13T07:41:02.000Z',
+    origin: { kind: 'task-notification' },
+    message: { content: '<task-notification>\n<status>stopped</status>\n</task-notification>' },
+    ...CODE,
+  })
+  await board.clock.advance(5000)
+  expect(await isAtWork()).toBe(true)
+
+  for (let scan = 0; scan < 14; scan += 1) {
+    await board.clock.advance(5000)
+  }
+  expect(await isAtWork()).toBe(false)
+  expect((await board.texts()).some(text => text === '검수 화면 정리')).toBe(true)
+  expect(board.banners()).toEqual([])
+})
+
 test('a session waiting on the sessions it started is in the background, and one started in a worktree is listed under its project and starter', async ($, on) => {
   const PARENT = HARBOR
   const CHILD = MONEY

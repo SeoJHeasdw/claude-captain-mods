@@ -32,6 +32,12 @@ export type Tail = {
   since: number | null
   /** The prompt the latest entries answer, by which a start beyond the tail is looked for. */
   promptId: string | null
+  /**
+   * Where the latest prompt has not been sent to the model: what the tail read before it. A
+   * session writes down each request it sends, so a prompt with none after it begins no work
+   * yet. Null where it was sent, or where the tail holds no request to tell by.
+   */
+  unsent: { last: Last | null; since: number | null } | null
 }
 
 export type Home = { cwd: string | null; branch: string | null }
@@ -59,6 +65,8 @@ const TASK_MAX_MS = 4 * 3600_000
 const EXPIRY_GRACE_MS = 2 * 60_000
 // A scheduled wakeup that has not begun a turn this long after it was due is taken as gone.
 const WAKE_GRACE_MS = 2 * 60_000
+// A prompt the session has not sent the model this long after it came is taken as never sent.
+const UNSENT_MS = 60_000
 
 const text = (value: unknown): string | null =>
   typeof value === 'string' && value !== '' ? value : null
@@ -131,7 +139,9 @@ export const readTail = (source: string): Tail => {
     last: null,
     since: null,
     promptId: null,
+    unsent: null,
   }
+  let isRecorded = false
   // The title the app shows is the one set for the session; failing that the generated one,
   // and only then a side session's short name, which the app writes beside its title.
   const titles: Record<'custom' | 'ai' | 'agent', string | null> = {
@@ -162,12 +172,26 @@ export const readTail = (source: string): Tail => {
       tail.places.set(cwd, branch)
     }
     tail.entrypoint = text(entry.entrypoint) ?? tail.entrypoint
+    if (entry.type === 'api-request') {
+      isRecorded = true
+      tail.unsent = null
+    }
     const isMain = entry.isSidechain !== true
     if (entry.type === 'user' && isMain) {
       tail.promptId = text(entry.promptId) ?? tail.promptId
     }
     const at = Date.parse(String(entry.timestamp))
     if (!Number.isNaN(at)) {
+      // A prompt, no tool's result nor an interrupt, keeps what stood before it until a request
+      // follows: a resumed session writes a background task's notice as one and may leave.
+      const isPrompt =
+        entry.type === 'user' &&
+        isMain &&
+        !blocksOf(entry).some(block => block.type === 'tool_result') &&
+        lastOf(entry, at)?.kind === 'model'
+      if (isPrompt && tail.unsent === null) {
+        tail.unsent = { last: tail.last, since: tail.since }
+      }
       // A turn starts with the person's prompt or one the session raised itself (a background
       // task's notice, a schedule). It begins the work only after a finished turn, or after one
       // left so long that it has ended unrecorded: a prompt sent mid-work joins that work.
@@ -226,9 +250,20 @@ export const readTail = (source: string): Tail => {
     }
   }
   tail.title = titles.custom ?? titles.ai ?? titles.agent
+  tail.unsent = isRecorded ? tail.unsent : null
 
   return tail
 }
+
+/**
+ * The tail as it stands at `now`: a prompt the session has not sent the model a minute after it
+ * came begins no work (a resume that wrote a notice and left, a window closed on a prompt), and
+ * the session reads as it did before it.
+ */
+export const tailAt = (tail: Tail, now: number): Tail =>
+  tail.unsent !== null && tail.last !== null && now - tail.last.at > UNSENT_MS
+    ? { ...tail, last: tail.unsent.last, since: tail.unsent.since, unsent: null }
+    : tail
 
 export type Task = { kind: 'shell' | 'monitor' | 'agent'; at: number; until: number }
 

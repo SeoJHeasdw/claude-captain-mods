@@ -13,6 +13,7 @@ import {
   readTail,
   rowOf,
   stateOf,
+  tailAt,
 } from './parse'
 
 const AT = Date.parse('2026-10-13T07:40:00.000Z')
@@ -165,6 +166,42 @@ test('a prompt sent mid-work joins that work; one after a finished turn or a lon
   expect(midWork.since).toBe(AT)
   expect(afterEnd.since).toBe(AT + 60_000)
   expect(afterSilence.since).toBe(AT + 3_600_000)
+})
+
+const request = (seconds: number) => ({ type: 'api-request', timestamp: at(seconds), querySource: 'sdk' })
+
+// What a resumed session writes for a background command the process before it left running.
+const resumeNotice = (seconds: number) => ({
+  type: 'user',
+  timestamp: at(seconds),
+  promptId: 'p2',
+  origin: { kind: 'task-notification' },
+  message: { content: '<task-notification>\n<status>stopped</status>\n</task-notification>' },
+})
+
+test('a prompt the session never sends, as a resume writes a notice and leaves, is no work a minute on', () => {
+  const resumed = readTail(
+    lines(prompt(0, 'p1'), request(1), call(10), request(11), turnEnd(20), resumeNotice(600)),
+  )
+  const sent = readTail(
+    lines(prompt(0, 'p1'), request(1), call(10), request(11), turnEnd(20), resumeNotice(600), request(601)),
+  )
+
+  // A request takes a moment to go out: within the minute the prompt reads as work begun.
+  expect(stateOf(tailAt(resumed, AT + 630_000).last, AT + 630_000)).toBe('working')
+  const later = tailAt(resumed, AT + 700_000)
+  expect(stateOf(later.last, AT + 700_000)).toBe('done')
+  expect(later.since).toBeNull()
+  expect(rowOf('/p/-x/a.jsonl', later, 0, AT + 700_000, '').at).toBe(AT + 20_000)
+  // A prompt sent is work under way however quiet it goes, until the transcript is stale.
+  expect(stateOf(tailAt(sent, AT + 700_000).last, AT + 700_000)).toBe('working')
+})
+
+test('a transcript that records no requests cannot tell an unsent prompt, and reads as before', () => {
+  const tail = readTail(lines(prompt(0, 'p1'), call(10), turnEnd(20), resumeNotice(600)))
+
+  expect(tail.unsent).toBeNull()
+  expect(stateOf(tailAt(tail, AT + 700_000).last, AT + 700_000)).toBe('working')
 })
 
 test('a tail that begins mid-work knows no start but names the prompt to look for; a finished turn has none', () => {

@@ -18,6 +18,7 @@ import {
   readTail,
   rowOf,
   stateOf,
+  tailAt,
 } from './parse'
 import type { Home, Ledger, Tail } from './parse'
 
@@ -649,7 +650,7 @@ const stateNow = async (
     if (tail === null) {
       return null
     }
-    const { last } = tail
+    const { last } = tailAt(tail, now)
     const probes = pendingShell(last, now)
     let isRunning: boolean | undefined
     if (probes !== null) {
@@ -753,8 +754,10 @@ const scan = async ($: EngineInterface): Promise<void> => {
         const fresh = await tailOf($, file.path, file.size, file.mtime * 1000)
         if (fresh !== null) {
           const tail = await withStart($, file.path, fresh)
-          // Only a finished turn is asked what it left running.
-          const ledger = tail.last?.kind === 'end' ? await ledgerIn($, file.path) : null
+          // Only a finished turn is asked what it left running: the tail's own, or the one a
+          // prompt not yet sent stands after.
+          const isEnded = tail.last?.kind === 'end' || tail.unsent?.last?.kind === 'end'
+          const ledger = isEnded ? await ledgerIn($, file.path) : null
           hit = {
             mtime: file.mtime,
             size: file.size,
@@ -766,8 +769,10 @@ const scan = async ($: EngineInterface): Promise<void> => {
         }
       }
       // A transcript that could not be read keeps its last reading, and is read again next scan.
+      // A prompt never sent writes nothing more, so the reading is settled against the clock here,
+      // past the cache, not when the transcript is read.
       if (hit !== undefined) {
-        read.push({ path: file.path, ...hit, mtime: file.mtime, size: file.size })
+        read.push({ path: file.path, ...hit, tail: tailAt(hit.tail, now), mtime: file.mtime, size: file.size })
       }
     }
     // A shell call that has sat is either running or waiting to be allowed, and the transcript
@@ -818,8 +823,10 @@ const scan = async ($: EngineInterface): Promise<void> => {
         // A finish is a turn the session ended itself: not one the person interrupted, nor a
         // wait passed over or background work run out with no word from the session since.
         // It must hold before its banner, as a session the app wakes again at once is not done.
+        // A finish is newer than what the scan read before: an older one coming back (a prompt
+        // that was never sent, given up) is no news.
         let held = finishes.get(row.id)
-        if (one?.tail.last?.kind === 'end' && was.at !== row.at && !row.isInterrupted) {
+        if (one?.tail.last?.kind === 'end' && row.at > was.at && !row.isInterrupted) {
           held = { at: row.at, since: now }
           finishes.set(row.id, held)
         }
