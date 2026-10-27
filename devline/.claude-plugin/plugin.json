@@ -1,0 +1,12 @@
+{
+  "name": "devline",
+  "version": "0.1.0",
+  "description": "A quiet band above the prompt: project, branch and uncommitted changes, the prompt cache's time left, and a call-out when another session wants a look.",
+  "author": {
+    "name": "SeoJHeasdw"
+  },
+  "types": "./types/index.d.ts",
+  "dependencies": [
+    "session-board"
+  ]
+}

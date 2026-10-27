@@ -1,0 +1,17 @@
+{
+  "name": "claude-captain-mods",
+  "owner": { "name": "SeoJHeasdw" },
+  "description": "Claude Code desktop mods for running many sessions at once: a session board pane with macOS banners, and a status band above the prompt.",
+  "plugins": [
+    {
+      "name": "session-board",
+      "source": "./session-board",
+      "description": "A pane listing every recent Claude Code session on this machine with its state, and a macOS banner when one finishes or waits on you."
+    },
+    {
+      "name": "devline",
+      "source": "./devline",
+      "description": "A quiet band above the prompt: project, branch and uncommitted changes, the prompt cache's time left, and a call-out when another session wants a look."
+    }
+  ]
+}

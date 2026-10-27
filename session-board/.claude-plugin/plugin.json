@@ -1,0 +1,7 @@
+{
+  "name": "session-board",
+  "version": "0.1.0",
+  "description": "A pane listing every recent Claude Code session on this machine (desktop, VS Code, terminal) with its state, read from the session transcripts.",
+  "author": { "name": "SeoJHeasdw" },
+  "types": "./types/index.d.ts"
+}
