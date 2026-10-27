@@ -6,6 +6,10 @@ Claude Code 데스크톱 앱에서 쓰는 모드 두 개입니다. 여러 세션
 
 `/board`로 여는 옆 패널입니다. 이 컴퓨터에서 최근에 쓴 Claude Code 세션(데스크톱 · VS Code · 터미널)을 대화 기록에서 읽어 상태별로 보여 줍니다.
 
+<p align="center">
+  <img src="docs/board.png" alt="session-board 패널: 결재 대기, 완료 보고, 복귀 완료 섹션" width="420">
+</p>
+
 - **결재 대기**: 허가나 답을 기다리는 세션. 얼마나 기다렸는지 게이지와 함께 표시
 - **완료 보고**: 방금 끝난 세션. `열기`나 `확인`을 누를 때까지 카드가 남음
 - **작전 중**: 지금 일하는 세션, 백그라운드 작업을 기다리는 세션
@@ -13,7 +17,20 @@ Claude Code 데스크톱 앱에서 쓰는 모드 두 개입니다. 여러 세션
 
 세션이 끝나거나 사람을 부르면 macOS 알림 배너가 뜨고, 배너를 누르면 그 세션으로 갑니다. 5초마다 다시 읽습니다.
 
+<p align="center">
+  <img src="docs/banner.png" alt="세션이 일을 끝냈을 때 뜨는 완료 배너" width="460">
+</p>
+
+| 호출 | 완료 |
+| :-: | :-: |
+| <img src="session-board/notifier/icons/call.png" alt="호출 알림 아이콘" width="96"> | <img src="session-board/notifier/icons/done.png" alt="완료 알림 아이콘" width="96"> |
+| 결재나 답을 기다릴 때 | 일을 끝냈을 때 |
+
 ## devline — 프롬프트 위 상태 띠
+
+<p align="center">
+  <img src="docs/devline.png" alt="프롬프트 위의 devline 띠: 폴더 이름과 캐시 남은 시간" width="460">
+</p>
 
 - 프로젝트 · 브랜치 · 커밋 안 한 변경 수
 - 프롬프트 캐시가 얼마나 남았는지(`cache 50m`), 캐시를 거의 못 쓴 요청은 `cache miss`
