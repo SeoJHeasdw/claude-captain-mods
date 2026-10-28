@@ -1289,6 +1289,9 @@ test('a session waiting on the sessions it started is in the background, and one
   const CHILD = MONEY
   const parentPath = `${ROOT}/-work-assets/${PARENT}.jsonl`
   const childPath = `${ROOT}/-work-assets--claude-worktrees-happy-davinci-5c2ed9/${CHILD}.jsonl`
+  // At work too, and listed after the started one: the starter's line stays with its own.
+  const otherPath = `${ROOT}/-work-review/${AUDIT}.jsonl`
+  const REVIEW = { cwd: '/work/review', gitBranch: 'main', entrypoint: 'claude-desktop' }
   const ASSETS = { cwd: '/work/assets', gitBranch: 'main', entrypoint: 'claude-desktop' }
   const WORKTREE = {
     cwd: '/work/assets/.claude/worktrees/happy-davinci-5c2ed9',
@@ -1306,6 +1309,11 @@ test('a session waiting on the sessions it started is in the background, and one
       { type: 'agent-name', agentName: 'sort-fix' },
       { type: 'user', timestamp: '2026-10-13T07:31:05.000Z', turnOrigin: 'sdk', message: { content: '시작' }, ...WORKTREE },
       { type: 'assistant', timestamp: '2026-10-13T07:40:50.000Z', ...WORKTREE, message: { stop_reason: null, content: [{ type: 'text', text: '고치는 중' }] } },
+    ],
+    [otherPath]: [
+      { type: 'custom-title', customTitle: '리뷰 피드백' },
+      { type: 'user', timestamp: '2026-10-13T07:40:00.000Z', turnOrigin: 'human', message: { content: '봐줘' }, ...REVIEW },
+      { type: 'assistant', timestamp: '2026-10-13T07:40:40.000Z', ...REVIEW, message: { stop_reason: null, content: [{ type: 'text', text: '보는 중' }] } },
     ],
   }
   const RECORDS = '/home/me/Library/Application Support/Claude/claude-code-sessions/a/b'
@@ -1361,14 +1369,16 @@ test('a session waiting on the sessions it started is in the background, and one
   expect(first.some(text => /sort-fix/.test(text))).toBe(false)
   expect(first.some(text => text === '정렬·필터 버그 수정')).toBe(true)
   expect(first.some(text => text === 'assets · ↳ 엔진 개선 사항')).toBe(true)
-  // The starter only waits: one dim line under the session it started, and not counted out.
+  // The starter only waits: one dim line under the session it started, and not counted out;
+  // a session it did not start comes after them both.
   expect(first).toContain('엔진 개선 사항 · 대원 1명 기다리는 중 · 10m째')
   expect(first.some(text => /^◌ 대원 1명 기다리는 중/.test(text))).toBe(false)
-  expect(first.some(text => /대장님, 대원 1명 출동 중 · 대기 1명$/.test(text))).toBe(true)
-  expect(first.some(text => /● 출동 1/.test(text))).toBe(true)
-  expect(first.indexOf('엔진 개선 사항 · 대원 1명 기다리는 중 · 10m째')).toBeGreaterThan(
-    first.indexOf('정렬·필터 버그 수정'),
-  )
+  expect(first.some(text => /대장님, 대원 2명 출동 중 · 대기 1명$/.test(text))).toBe(true)
+  expect(first.some(text => /● 출동 2/.test(text))).toBe(true)
+  const at = (text: string) => first.indexOf(text)
+  expect(at('정렬·필터 버그 수정')).toBeGreaterThan(-1)
+  expect(at('엔진 개선 사항 · 대원 1명 기다리는 중 · 10m째')).toBeGreaterThan(at('정렬·필터 버그 수정'))
+  expect(at('리뷰 피드백')).toBeGreaterThan(at('엔진 개선 사항 · 대원 1명 기다리는 중 · 10m째'))
 
   // The started session finishes: its own finish is announced; its starter's wait ending,
   // with no word from it since, is not.

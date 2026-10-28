@@ -22,6 +22,8 @@ export type Row = {
   worktree: string | null
   /** The title of the session that started this one, where that one is listed. */
   parent: string | null
+  /** The id of that session, where it is listed. */
+  parentId: string | null
   title: string
   source: string
   state: RowState

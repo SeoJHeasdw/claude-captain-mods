@@ -121,6 +121,36 @@ const isStandingBy = (row: Row): boolean => {
   )
 }
 
+/**
+ * The busy sessions by family, each family where its first member stands among `rows`: a session
+ * started by another of them goes with its starter, below one at work itself (its card) and above
+ * one that only waits on it (its dim line), so that line is never left under other sessions' cards.
+ */
+const familiesOf = (rows: readonly Row[]): { lead: Row; members: Row[] }[] => {
+  // A board kept from before rows named their starter's id has none until its next scan.
+  const starterOf = (row: Row) => rows.find(other => other.id === (row.parentId ?? null))
+  const placed = new Set<string>()
+  const familyOf = (row: Row): Row[] => {
+    placed.add(row.id)
+    const started = rows
+      .filter(other => other.parentId === row.id && !placed.has(other.id))
+      .flatMap(familyOf)
+
+    return isStandingBy(row) ? [...started, row] : [row, ...started]
+  }
+
+  return rows.flatMap(row => {
+    let lead = row
+    const seen = new Set([row.id])
+    for (let up = starterOf(lead); up !== undefined && !seen.has(up.id); up = starterOf(lead)) {
+      seen.add(up.id)
+      lead = up
+    }
+
+    return placed.has(lead.id) ? [] : [{ lead, members: familyOf(lead) }]
+  })
+}
+
 // A session that finished, or one that now waits on the person: each raised by its own app.
 type Banner = 'done' | 'call'
 const APPS: Record<Banner, string> = { done: 'Done', call: 'Call' }
@@ -1210,6 +1240,23 @@ export const register: Register = on => {
       )
     }
 
+    // A starter that only waits on the sessions it started: one line, cut at its end, the title
+    // staying longest, then what it waits on.
+    const standingLine = (row: Row) =>
+      lineOf(
+        row,
+        <Box columnGap="sm" flexGrow={1} flexShrink={1} minWidth={0}>
+          <Text color={BLUE} dimColor mono>
+            {LOOK.background.mark}
+          </Text>
+          <Box flexShrink={1} minWidth={0}>
+            <Text dimColor size="footnote" wrap="truncate-end">
+              {`${row.title === '' ? '(제목 없음)' : row.title} · ${labelOf(row)} · ${ago(now - startOf(row))}째`}
+            </Text>
+          </Box>
+        </Box>,
+      )
+
     const tree = (
       <Box flexDirection="column" rowGap="md">
         <Box flexDirection="column" rowGap="xs">
@@ -1253,23 +1300,18 @@ export const register: Register = on => {
         {busy.length > 0 && (
           <Box flexDirection="column" rowGap="sm">
             {section('작전 중')}
-            {working.map(card)}
-            {standing.map(row =>
-              lineOf(
-                row,
-                // One line, cut at its end: the title stays longest, then what it waits on.
-                <Box columnGap="sm" flexGrow={1} flexShrink={1} minWidth={0}>
-                  <Text color={BLUE} dimColor mono>
-                    {LOOK.background.mark}
-                  </Text>
-                  <Box flexShrink={1} minWidth={0}>
-                    <Text dimColor size="footnote" wrap="truncate-end">
-                      {`${row.title === '' ? '(제목 없음)' : row.title} · ${labelOf(row)} · ${ago(now - startOf(row))}째`}
-                    </Text>
-                  </Box>
-                </Box>,
-              ),
-            )}
+            {familiesOf([...working, ...standing]).map(({ lead, members }) => {
+              const drawn = members.map(row => (isStandingBy(row) ? standingLine(row) : card(row)))
+
+              // A family keeps closer together than the sessions around it.
+              return members.length === 1 ? (
+                drawn[0]
+              ) : (
+                <Box key={`family:${lead.id}`} flexDirection="column" rowGap="xs">
+                  {drawn}
+                </Box>
+              )
+            })}
           </Box>
         )}
         {back.length > 0 && (

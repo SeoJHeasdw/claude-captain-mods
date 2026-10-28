@@ -598,6 +598,7 @@ export const rowOf = (
     branch: worktree !== null && branch === `claude/${worktree}` ? null : branch,
     worktree,
     parent: null,
+    parentId: null,
     title: (tail.title ?? tail.lastPrompt ?? '').replace(/\s+/g, ' ').trim(),
     source: SOURCES[entrypoint] ?? entrypoint.replace(/^claude-/, ''),
     state: stateOf(last, now, isRunning, pending),
@@ -643,11 +644,12 @@ export const linkRows = (rows: readonly Row[], parentOf: (id: string) => string 
   }
 
   return rows.map(row => {
-    const parentId = parentOf(row.id)
+    const starter = parentOf(row.id)
+    const parentId = starter !== null && titles.has(starter) ? starter : null
     const parent = parentId === null ? null : titles.get(parentId) || null
     const sessions = started(row.id).filter(other => isFamilyAtWork(other, new Set([row.id]))).length
     if (sessions === 0) {
-      return { ...row, parent }
+      return { ...row, parent, parentId }
     }
     const pending = {
       shells: 0,
@@ -662,6 +664,7 @@ export const linkRows = (rows: readonly Row[], parentOf: (id: string) => string 
     return {
       ...row,
       parent,
+      parentId,
       pending,
       state: row.state === 'done' ? 'background' : row.state,
     }
