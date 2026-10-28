@@ -1490,3 +1490,59 @@ test('a click the desktop app turns into a focus move on an unfocused pane opens
   expect(opens()).toBe(3)
   await focused.unmount()
 })
+
+/** The keys of the Buttons in an element as found, at any depth. */
+const buttonsIn = (node: unknown): string[] => {
+  if (typeof node !== 'object' || node === null) {
+    return []
+  }
+  const { type, props, children } = node as { type?: unknown; props?: { key?: unknown }; children?: unknown }
+
+  return [
+    ...(type === 'Button' ? [String(props?.key)] : []),
+    ...(Array.isArray(children) ? children.flatMap(buttonsIn) : []),
+  ]
+}
+
+test('in a narrow pane a card’s buttons leave its top line for one of their own, and a row’s go beneath its text', async (...harness) => {
+  const [$] = harness
+  const world = {
+    processes: '',
+    entries: [
+      { type: 'ai-title', aiTitle: '영상 길이 검토' },
+      { type: 'user', timestamp: '2026-10-13T07:40:30.000Z', turnOrigin: 'human', message: { content: '봐줘' }, ...CODE },
+    ] as object[],
+  }
+  const board = await boardOver(harness, STUDIO_PATH, NOW, world)
+  // The VS Code session answers: a finish not yet seen, its card with 열기, 데스크톱으로 and 확인.
+  world.entries.push({ ...ended('2026-10-13T07:41:01.000Z'), ...CODE })
+  await board.clock.advance(5000)
+  const buttons = [`open:${HARBOR}`, `desktop:${HARBOR}`, `seen:${HARBOR}`]
+  const look = async (surface: (typeof SURFACES)[number], bodyColumns: number) => {
+    const ui = await $.ui.mount({ ...PANE, surface, props: { ...PANE.props, bodyColumns } })
+    const row = await ui.find({ key: `row:${HARBOR}` })
+    await ui.unmount()
+
+    return { parts: (row?.children ?? []).map(buttonsIn), direction: row?.props.flexDirection }
+  }
+
+  for (const [surface, wide, narrow] of [['terminal', 72, 40], ['desktop', 60, 34]] as const) {
+    // Wide, the label, gauge, time and buttons share the top line, and nothing stands below.
+    const roomy = (await look(surface, wide)).parts
+    expect(roomy[0]).toEqual(buttons)
+    expect(roomy.slice(1).flat()).toEqual([])
+    // Narrow, the top line keeps the label, gauge and time; the buttons close the card.
+    const tight = (await look(surface, narrow)).parts
+    expect(tight[0]).toEqual([])
+    expect(tight.at(-1)).toEqual(buttons)
+  }
+
+  // Seen, it goes down among the rest: one line, its buttons beside the title or beneath it.
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: `seen:${HARBOR}` })
+  await ui.unmount()
+  await board.clock.advance(5000)
+  const after = [`open:${HARBOR}`, `desktop:${HARBOR}`]
+  expect(await look('desktop', 60)).toEqual({ parts: [[], after], direction: undefined })
+  expect(await look('desktop', 34)).toEqual({ parts: [[], after], direction: 'column' })
+})

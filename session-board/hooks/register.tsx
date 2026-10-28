@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type { Pending, Row, RowState } from '../types'
 import {
@@ -81,6 +81,26 @@ const SPIN = ['◐', '◓', '◑', '◒'] as const
 // The elapsed gauge, a line that fills a segment for each ten minutes gone, full at an hour.
 const GAUGE_CELLS = 6
 const GAUGE_CELL_MS = 10 * 60_000
+
+// A row's buttons stand beside its text only where the text keeps this much of the pane's
+// cells beside them (a card's label, `✓ 임무 완료` nearly whole; a row's title); short of it,
+// they go beneath, flush right, rather than crowd the text out or over it.
+const LABEL_CELLS = 10
+const TEXT_CELLS = 16
+
+/**
+ * How a surface spends the pane's cells. The terminal draws a wide character in two and a
+ * button as `[ label ]`; a desktop draws its own face in fewer of its code font's cells (a
+ * Hangul syllable in about one and a half) and spaces its buttons and gaps wider.
+ */
+type Fit = { scale: number; button: number; gap: number; frame: number }
+const GRID: Fit = { scale: 1, button: 4, gap: 1, frame: 4 }
+const FACE: Fit = { scale: 0.75, button: 3, gap: 1.5, frame: 2.5 }
+const WIDE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/
+
+/** The terminal's cells a text takes: two for a wide character, one for any other. */
+const cellsOf = (text: string): number =>
+  [...text].reduce((sum, char) => sum + (WIDE.test(char) ? 2 : 1), 0)
 const isBusy = (row: Row): boolean =>
   row.state === 'working' || row.state === 'tool' || row.state === 'background'
 /**
@@ -901,6 +921,20 @@ type Press =
   | { kind: 'open' | 'desktop'; row: Row; seen: readonly Row[] }
   | { kind: 'seen'; seen: readonly Row[] }
 
+const LABELS: Record<Press['kind'], string> = { open: '열기', desktop: '데스크톱으로', seen: '확인' }
+// Drawn on this session's own row in place of its buttons.
+const SELF_NOTE = '지금 이 세션'
+
+/**
+ * A row's buttons, in the order drawn: its own window, where one is known; a hand-over of a
+ * finished session another client ran; and 확인 on a finish not yet seen.
+ */
+const buttonsOf = (row: Row, isUnseen: boolean): Press['kind'][] => [
+  ...(row.source !== 'terminal' ? (['open'] as const) : []),
+  ...(row.source !== 'desktop' && !isLive(row) ? (['desktop'] as const) : []),
+  ...(isUnseen ? (['seen'] as const) : []),
+]
+
 /** Runs a button's press, whether the press itself or a focusing click raised it. */
 const act = ($: EngineInterface, press: Press): void => {
   if (press.seen.length > 0) {
@@ -997,6 +1031,7 @@ export const register: Register = on => {
     // The terminal lays the board on its grid of cells; every other surface draws Text in its own
     // face and sizes, where a rule of dashes has no column to run to and is left out.
     const isGrid = e.surface === 'terminal'
+    const fit = isGrid ? GRID : FACE
     isPaneFocused = e.props.isFocused
     // Each button's press, kept by its key so that a focusing click can run it too.
     const handlers = new Map<string, Press>()
@@ -1058,7 +1093,7 @@ export const register: Register = on => {
         return (
           <Box flexShrink={0}>
             <Text size="footnote" dimColor>
-              지금 이 세션
+              {SELF_NOTE}
             </Text>
           </Box>
         )
@@ -1067,36 +1102,56 @@ export const register: Register = on => {
 
       return (
         <Box columnGap="sm" flexShrink={0}>
-          {row.source !== 'terminal' && (
+          {buttonsOf(row, isUnseen(row)).map(kind => (
             <Button
-              key={`open:${row.id}`}
-              label="열기"
-              dimColor={isQuiet}
-              onPress={press(`open:${row.id}`, { kind: 'open', row, seen })}
+              key={`${kind}:${row.id}`}
+              label={LABELS[kind]}
+              dimColor={kind === 'desktop' || (kind === 'open' && isQuiet)}
+              onPress={press(`${kind}:${row.id}`, kind === 'seen' ? { kind, seen } : { kind, row, seen })}
             />
-          )}
-          {row.source !== 'desktop' && !isLive(row) && (
-            <Button
-              key={`desktop:${row.id}`}
-              label="데스크톱으로"
-              dimColor
-              onPress={press(`desktop:${row.id}`, { kind: 'desktop', row, seen })}
-            />
-          )}
-          {isUnseen(row) && (
-            <Button
-              key={`seen:${row.id}`}
-              label="확인"
-              onPress={press(`seen:${row.id}`, { kind: 'seen', seen })}
-            />
-          )}
+          ))}
         </Box>
       )
     }
+    // The pane's cells a text takes, at most `most` of the terminal's; and a row's buttons.
+    const across = (text: string, most = Number.POSITIVE_INFINITY): number =>
+      Math.min(cellsOf(text), most) * fit.scale
+    const actionsAcross = (row: Row): number => {
+      if (row.isSelf) {
+        return across(SELF_NOTE)
+      }
+      const labels = buttonsOf(row, isUnseen(row)).map(kind => LABELS[kind])
+
+      return (
+        labels.reduce((sum, label) => sum + across(label) + fit.button, 0) +
+        fit.gap * Math.max(0, labels.length - 1)
+      )
+    }
+    // A one-line row, its mark and text, with its buttons beside it where the text keeps its
+    // room, else beneath it, flush right.
+    const lineOf = (row: Row, line: RenderElement) =>
+      1 + TEXT_CELLS * fit.scale + 2 * fit.gap + actionsAcross(row) <= e.props.bodyColumns ? (
+        <Box key={`row:${row.id}`} justifyContent="space-between" alignItems="center" columnGap="sm">
+          {line}
+          {actions(row, true)}
+        </Box>
+      ) : (
+        <Box key={`row:${row.id}`} flexDirection="column" rowGap="xs">
+          {line}
+          <Box justifyContent="flex-end">{actions(row, true)}</Box>
+        </Box>
+      )
     const card = (row: Row) => {
       const color = isUnseen(row) ? GREEN : LOOK[row.state].color
       const elapsed = now - startOf(row)
       const gauge = gaugeOf(elapsed)
+      const mark = `${markOf(row, now)} ${labelOf(row)}`
+      const time = `${ago(elapsed)}째`
+      // The top line holds the label, the gauge, the time and the buttons where the pane is wide
+      // enough for all four; narrower, the buttons take a line of their own at the card's foot.
+      const isBeside =
+        fit.frame + across(mark, LABEL_CELLS) + GAUGE_CELLS + across(time) + 3 * fit.gap + actionsAcross(row) <=
+        e.props.bodyColumns
 
       return (
         <Box
@@ -1113,7 +1168,7 @@ export const register: Register = on => {
             <Box columnGap="sm" flexGrow={1} flexShrink={1} minWidth={0}>
               <Box flexShrink={1} minWidth={0}>
                 <Text color={color} size="footnote" weight="semibold" wrap="truncate-end">
-                  {markOf(row, now)} {labelOf(row)}
+                  {mark}
                 </Text>
               </Box>
               <Box columnGap="sm" flexShrink={0}>
@@ -1131,11 +1186,11 @@ export const register: Register = on => {
                   )}
                 </Box>
                 <Text dimColor size="footnote" tabular>
-                  {ago(elapsed)}째
+                  {time}
                 </Text>
               </Box>
             </Box>
-            {actions(row, false)}
+            {isBeside && actions(row, false)}
           </Box>
           <Text weight="semibold" wrap="truncate-end">
             {row.title === '' ? '(제목 없음)' : row.title}
@@ -1146,6 +1201,11 @@ export const register: Register = on => {
           <Text dimColor size="footnote" wrap="truncate-end">
             {whereOf(row)}
           </Text>
+          {!isBeside && (
+            <Box justifyContent="flex-end" marginTop="xs">
+              {actions(row, false)}
+            </Box>
+          )}
         </Box>
       )
     }
@@ -1194,9 +1254,10 @@ export const register: Register = on => {
           <Box flexDirection="column" rowGap="sm">
             {section('작전 중')}
             {working.map(card)}
-            {standing.map(row => (
-              <Box key={`row:${row.id}`} justifyContent="space-between" alignItems="center" columnGap="sm">
-                {/* One line, cut at its end: the title stays longest, then what it waits on. */}
+            {standing.map(row =>
+              lineOf(
+                row,
+                // One line, cut at its end: the title stays longest, then what it waits on.
                 <Box columnGap="sm" flexGrow={1} flexShrink={1} minWidth={0}>
                   <Text color={BLUE} dimColor mono>
                     {LOOK.background.mark}
@@ -1206,20 +1267,20 @@ export const register: Register = on => {
                       {`${row.title === '' ? '(제목 없음)' : row.title} · ${labelOf(row)} · ${ago(now - startOf(row))}째`}
                     </Text>
                   </Box>
-                </Box>
-                {actions(row, true)}
-              </Box>
-            ))}
+                </Box>,
+              ),
+            )}
           </Box>
         )}
         {back.length > 0 && (
           <Box flexDirection="column" rowGap="md">
             {section('복귀 완료')}
-            {back.map(row => (
-              <Box key={`row:${row.id}`} justifyContent="space-between" alignItems="center" columnGap="sm">
-                {/* The text gives way to the pane's width, cut with an ellipsis; the button not.
-                    The mark keeps a column of its own, so both lines start under the title in
-                    any face. */}
+            {back.map(row =>
+              lineOf(
+                row,
+                // The text gives way to the pane's width, cut with an ellipsis; the buttons not.
+                // The mark keeps a column of its own, so both lines start under the title in
+                // any face.
                 <Box columnGap="sm" flexGrow={1} flexShrink={1} minWidth={0}>
                   <Text dimColor mono>
                     {markOf(row, now)}
@@ -1232,10 +1293,9 @@ export const register: Register = on => {
                       {whereOf(row)}
                     </Text>
                   </Box>
-                </Box>
-                {actions(row, true)}
-              </Box>
-            ))}
+                </Box>,
+              ),
+            )}
           </Box>
         )}
         <Text size="caption" dimColor>
