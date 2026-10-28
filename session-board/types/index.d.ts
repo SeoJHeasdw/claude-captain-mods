@@ -1,6 +1,9 @@
 export type RowState = 'working' | 'tool' | 'waiting' | 'background' | 'done' | 'stale'
 
-/** What a finished turn left running, by which the session is not done yet. */
+/**
+ * The background work a session started and has not heard the end of: beside a turn under way,
+ * counted on its card; after a finished one, what keeps the session from being done.
+ */
 export type Pending = {
   shells: number
   monitors: number

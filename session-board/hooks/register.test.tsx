@@ -862,9 +862,13 @@ const boardOver = async (
         return ran(world.processes)
       case 'grep':
         return ran(`/home/me/Library/Application Support/Claude/claude-code-sessions/a/b/local_9.json\n`)
-      case 'sh':
-        // The ledger's grep: every line of the transcript, the ones it does not want ignored.
-        return ran(text)
+      case 'sh': {
+        // The ledger's grep: every line written from where the last read stopped to the size
+        // listed, the ones it does not want ignored.
+        const [from = 0, to = text.length] = e.argv.slice(5).map(Number)
+
+        return ran(text.slice(from, to))
+      }
       default:
         commands.push([...e.argv])
 
@@ -1379,6 +1383,13 @@ test('a session waiting on the sessions it started is in the background, and one
   expect(at('정렬·필터 버그 수정')).toBeGreaterThan(-1)
   expect(at('엔진 개선 사항 · 대원 1명 기다리는 중 · 10m째')).toBeGreaterThan(at('정렬·필터 버그 수정'))
   expect(at('리뷰 피드백')).toBeGreaterThan(at('엔진 개선 사항 · 대원 1명 기다리는 중 · 10m째'))
+  // The two share one box; the other session has its own.
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const family = keysIn(await ui.find({ key: `family:${PARENT}` })).filter(key => key.startsWith('row:'))
+  const own = keysIn(await ui.find({ key: `family:${AUDIT}` })).filter(key => key.startsWith('row:'))
+  await ui.unmount()
+  expect(family).toEqual([`row:${CHILD}`, `row:${PARENT}`])
+  expect(own).toEqual([`row:${AUDIT}`])
 
   // The started session finishes: its own finish is announced; its starter's wait ending,
   // with no word from it since, is not.
@@ -1436,14 +1447,18 @@ test('a session that only waits on its wakeup is one dim line, not out at work; 
   expect(resting.some(text => /대장님, 대기 1명$/.test(text))).toBe(true)
   expect(resting.some(text => /● 출동 0/.test(text))).toBe(true)
 
-  // A monitor it started still runs: it is at work itself, and has its card.
-  world.entries.splice(3, 0, {
-    type: 'user',
-    timestamp: '2026-10-13T07:40:38.000Z',
-    message: { content: [{ type: 'tool_result', content: 'started' }] },
-    toolUseResult: { taskId: 'bmon1', timeoutMs: 900_000, persistent: false },
-    ...DESK,
-  })
+  // Asked again, it starts a monitor and rests: at work itself, it has its card.
+  world.entries.push(
+    { type: 'user', timestamp: '2026-10-13T07:41:01.000Z', turnOrigin: 'human', message: { content: '로그도 지켜봐줘' }, ...DESK },
+    {
+      type: 'user',
+      timestamp: '2026-10-13T07:41:02.000Z',
+      message: { content: [{ type: 'tool_result', content: 'started' }] },
+      toolUseResult: { taskId: 'bmon1', timeoutMs: 900_000, persistent: false },
+      ...DESK,
+    },
+    ended('2026-10-13T07:41:03.000Z', '지켜보겠습니다'),
+  )
   await board.clock.advance(5000)
   const watching = await board.texts()
   expect(watching.some(text => /^◌ 보초 서는 중 · 모니터 1$/.test(text))).toBe(true)
@@ -1501,18 +1516,20 @@ test('a click the desktop app turns into a focus move on an unfocused pane opens
   await focused.unmount()
 })
 
-/** The keys of the Buttons in an element as found, at any depth. */
-const buttonsIn = (node: unknown): string[] => {
+/** The keys in an element as found, its own included, at any depth; of one type, given it. */
+const keysIn = (node: unknown, kind?: string): string[] => {
   if (typeof node !== 'object' || node === null) {
     return []
   }
   const { type, props, children } = node as { type?: unknown; props?: { key?: unknown }; children?: unknown }
 
   return [
-    ...(type === 'Button' ? [String(props?.key)] : []),
-    ...(Array.isArray(children) ? children.flatMap(buttonsIn) : []),
+    ...((kind === undefined || type === kind) && props?.key !== undefined ? [String(props.key)] : []),
+    ...(Array.isArray(children) ? children.flatMap(child => keysIn(child, kind)) : []),
   ]
 }
+
+const buttonsIn = (node: unknown): string[] => keysIn(node, 'Button')
 
 test('in a narrow pane a card’s buttons leave its top line for one of their own, and a row’s go beneath its text', async (...harness) => {
   const [$] = harness
@@ -1555,4 +1572,152 @@ test('in a narrow pane a card’s buttons leave its top line for one of their ow
   const after = [`open:${HARBOR}`, `desktop:${HARBOR}`]
   expect(await look('desktop', 60)).toEqual({ parts: [[], after], direction: undefined })
   expect(await look('desktop', 34)).toEqual({ parts: [[], after], direction: 'column' })
+})
+
+test('a session at work counts the subagents it sent off in the background until each one’s end is noticed', async (...harness) => {
+  const launched = (stamp: string, agentId: string) => ({
+    type: 'user',
+    timestamp: stamp,
+    ...CODE,
+    message: { content: [{ type: 'tool_result', content: 'Async agent launched successfully.' }] },
+    toolUseResult: { isAsync: true, status: 'async_launched', agentId },
+  })
+  const working = (stamp: string) => ({
+    type: 'assistant',
+    timestamp: stamp,
+    ...CODE,
+    message: { stop_reason: null, content: [{ type: 'text', text: '정리하는 중' }] },
+  })
+  const world = {
+    processes: '',
+    entries: [
+      { type: 'ai-title', aiTitle: '1040~1148 리뷰 피드백' },
+      { type: 'user', timestamp: '2026-10-13T07:39:00.000Z', turnOrigin: 'human', message: { content: '나눠서 봐줘' }, ...CODE },
+      launched('2026-10-13T07:39:51.000Z', 'a1'),
+      launched('2026-10-13T07:39:51.000Z', 'a2'),
+      working('2026-10-13T07:40:50.000Z'),
+    ] as object[],
+  }
+  const board = await boardOver(harness, STUDIO_PATH, NOW, world)
+  // The mark turns a quarter each scan: the label is read after it.
+  const label = async () => (await board.texts()).find(text => /^[◐◓◑◒] 열일 중/.test(text))?.slice(2)
+
+  expect(await label()).toBe('열일 중 · 에이전트 2')
+
+  // One reports back while the turn goes on: read from where the last read stopped.
+  world.entries.push(
+    {
+      type: 'queue-operation',
+      operation: 'enqueue',
+      timestamp: '2026-10-13T07:41:02.000Z',
+      content: '<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>',
+    },
+    working('2026-10-13T07:41:03.000Z'),
+  )
+  await board.clock.advance(5000)
+  expect(await label()).toBe('열일 중 · 에이전트 1')
+})
+
+test('a session no surface draws yet asks for no pane until one attaches, and then once', async ($, on) => {
+  const opens: string[] = []
+  let surfaces: readonly 'desktop'[] = []
+  const clock = mock.clock(on)
+  await clock.set(NOW)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('session.surfaces', () => ({ value: surfaces }))
+  on('session.attach', (_$, e) => ({ clientId: e.clientId }))
+  on('ui.open', (_$, e) => {
+    opens.push(e.id)
+
+    return { value: { isPlaced: true } }
+  })
+  on('env.get', (_$, e) => ({
+    value: e.name === 'CLAUDE_CODE_ENTRYPOINT' ? 'claude-desktop' : '/home/me',
+  }))
+  on('session.id', () => ({ value: SELF }))
+  on('process.run', () => ran(''))
+
+  await $.session.start({ cwd: '/work/edu', surface: 'terminal', isInteractive: true })
+  expect(opens).toEqual([])
+
+  surfaces = ['desktop']
+  await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
+  await $.session.attach({ surface: 'mobile', clientId: 'mobile:phone' })
+  expect(opens).toEqual(['board'])
+})
+
+test('a starter with several sessions out keeps one box, each of them one line in it', async ($, on) => {
+  const ASSETS = { cwd: '/work/assets', gitBranch: 'main', entrypoint: 'claude-desktop' }
+  const RECORDS = '/home/me/Library/Application Support/Claude/claude-code-sessions/a/b'
+  const sent = [MONEY, AUDIT, OLD]
+  const titles = ['정렬 버그 수정', '필터 버그 수정', '문서 정리']
+  const pathOf = (id: string) => `${ROOT}/-work-assets/${id}.jsonl`
+  const files: Record<string, object[]> = {
+    [pathOf(HARBOR)]: [
+      { type: 'custom-title', customTitle: '엔진 개선 사항' },
+      { type: 'user', timestamp: '2026-10-13T07:30:00.000Z', turnOrigin: 'human', message: { content: '나눠서 해줘' }, ...ASSETS },
+      { type: 'assistant', timestamp: '2026-10-13T07:31:00.000Z', ...ASSETS, message: { stop_reason: 'end_turn', content: [{ type: 'text', text: '셋에게 맡겼습니다' }] } },
+    ],
+    ...Object.fromEntries(
+      sent.map((id, index) => [
+        pathOf(id),
+        [
+          { type: 'custom-title', customTitle: titles[index] },
+          { type: 'user', timestamp: '2026-10-13T07:31:05.000Z', turnOrigin: 'sdk', message: { content: '시작' }, ...ASSETS },
+          { type: 'assistant', timestamp: `2026-10-13T07:40:5${index}.000Z`, ...ASSETS, message: { stop_reason: null, content: [{ type: 'text', text: '하는 중' }] } },
+        ],
+      ]),
+    ),
+  }
+  const clock = mock.clock(on)
+  await clock.set(NOW)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('env.get', (_$, e) => ({
+    value: e.name === 'CLAUDE_CODE_ENTRYPOINT' ? 'claude-desktop' : '/home/me',
+  }))
+  on('session.id', () => ({ value: SELF }))
+  on('process.run', (_$, e) => {
+    const text = (path: string) => transcript(...(files[path] ?? []))
+    switch (e.argv[0]) {
+      case 'find':
+        return ran(
+          e.argv.includes('*.jsonl')
+            ? Object.keys(files)
+                .map((path, index) => `${1_791_877_000 + index} ${text(path).length} ${path}`)
+                .join('\n')
+            : [
+                `${RECORDS}/local_p.json:"sessionId":"local_p","cliSessionId":"${HARBOR}"`,
+                ...sent.flatMap((id, index) => [
+                  `${RECORDS}/local_${index}.json:"sessionId":"local_${index}","cliSessionId":"${id}"`,
+                  `${RECORDS}/local_${index}.json:"spawnedFrom":{"sessionId":"local_p"`,
+                ]),
+              ].join('\n'),
+        )
+      case 'tail':
+        return ran(text(String(e.argv[3])))
+      default:
+        return ran('')
+    }
+  })
+
+  await $.session.start({ cwd: '/work/edu', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const texts = (await ui.findAll({ type: 'Text' })).map(found => found.text)
+  const box = await ui.find({ key: `family:${HARBOR}` })
+  await ui.unmount()
+
+  expect(texts).toContain('엔진 개선 사항 · 대원 3명 기다리는 중 · 10m째')
+  for (const title of titles) {
+    expect(texts.some(text => new RegExp(`^${title} · 열일 중 · \\d+m째$`).test(text))).toBe(true)
+    // No card of its own: the title is said once, on its line.
+    expect(texts).not.toContain(title)
+  }
+  // One box, its four lines close together; the starter's at the foot.
+  expect(box?.props.rowGap).toBe('xs')
+  const rows = (box?.children ?? []).map(child => keysIn(child)[0])
+  expect(rows.slice(0, 3).sort()).toEqual(sent.map(id => `row:${id}`).sort())
+  expect(rows[3]).toBe(`row:${HARBOR}`)
 })

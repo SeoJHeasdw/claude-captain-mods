@@ -167,6 +167,20 @@ const TOOL_NAMES: Record<string, string> = {
 const toolOf = (tool: string | null): string =>
   tool === null ? '도구' : (TOOL_NAMES[tool] ?? tool.replace(/^mcp__.+__/, ''))
 
+/** A label with the background work a session has running counted after it, where it has any. */
+const countedOf = (verb: string, pending: Pending | null): string => {
+  const counts =
+    pending === null
+      ? []
+      : [
+          pending.shells > 0 ? `명령 ${pending.shells}` : null,
+          pending.monitors > 0 ? `모니터 ${pending.monitors}` : null,
+          pending.agents > 0 ? `에이전트 ${pending.agents}` : null,
+        ].filter(part => part !== null)
+
+  return counts.length === 0 ? verb : `${verb} · ${counts.join(', ')}`
+}
+
 /**
  * What a session in the background is up to, by the work it waits on most: the sessions it
  * started, a monitor's watch, a subagent, a command, or a wakeup it set; then the rest counted.
@@ -188,13 +202,8 @@ const backgroundOf = (pending: Pending | null): string => {
             : wake !== null
               ? '알람 맞추고 쉬는 중'
               : '뒤에서 작업 중'
-  const counts = [
-    shells > 0 ? `명령 ${shells}` : null,
-    monitors > 0 ? `모니터 ${monitors}` : null,
-    agents > 0 ? `에이전트 ${agents}` : null,
-  ].filter(part => part !== null)
 
-  return counts.length === 0 ? verb : `${verb} · ${counts.join(', ')}`
+  return countedOf(verb, pending)
 }
 
 const labelOf = (row: Row): string => {
@@ -203,10 +212,11 @@ const labelOf = (row: Row): string => {
       return row.ask !== null
         ? '결재 바랍니다'
         : (ASKS[row.tool ?? ''] ?? `${toolOf(row.tool)} 허가 요청`)
+    // At work, with what it started in the background along the way: subagents sent off, say.
     case 'tool':
-      return `열일 중 · ${toolOf(row.tool)}`
+      return countedOf(`열일 중 · ${toolOf(row.tool)}`, row.pending)
     case 'working':
-      return '열일 중'
+      return countedOf('열일 중', row.pending)
     case 'background':
       return backgroundOf(row.pending)
     case 'done':
@@ -276,6 +286,8 @@ const tails = new Map<
   string,
   { mtime: number; size: number; tail: Tail; home: Home; ledger: Ledger | null }
 >()
+// Each transcript's ledger as last read, and the bytes it was read from.
+const ledgers = new Map<string, { size: number; ledger: Ledger }>()
 // Each session's state at the last scan, with the time of the entry it was read from.
 const states = new Map<string, { state: RowState; at: number }>()
 // Each finish read and not yet announced: the end it was read at, and when it was first read.
@@ -293,6 +305,9 @@ const calls = new Map<string, { at: number; since: number; isAnnounced: boolean 
 // The finishes marked seen by a press here, by their claim's name, before the mark is on disk.
 const marked = new Set<string>()
 let isScanning = false
+// Whether this session runs the board (the desktop app's), and whether it has asked for its pane.
+let isBoard = false
+let isOpened = false
 // The pane's buttons as last drawn, by key, each with what its press runs; whether the pane held
 // the keyboard then; and the button a focusing click was last taken as pressing, and when.
 let pressable = new Map<string, Press>()
@@ -444,19 +459,41 @@ const withStart = async ($: EngineInterface, path: string, tail: Tail): Promise<
 
 /**
  * The background work a transcript started and has not heard the end of, read from the whole
- * transcript, since a long turn soon pushes a task's start out of the tail. Null where it could
- * not be read; the session then reads as done when its turn is.
+ * transcript, since a long turn soon pushes a task's start out of the tail. A transcript only
+ * grows, so each read takes up the ledger where the last left it and greps only the bytes
+ * written since, up to the size the scan listed: a session at work is read every scan, and its
+ * transcript can run to tens of megabytes. Null where it was never read; the session then reads
+ * as done when its turn is.
  */
-const ledgerIn = async ($: EngineInterface, path: string): Promise<Ledger | null> => {
+const ledgerIn = async ($: EngineInterface, path: string, size: number): Promise<Ledger | null> => {
+  const known = ledgers.get(path)
+  // One that shrank was written anew, and is read from its start.
+  const from = known !== undefined && known.size <= size ? known : { size: 0, ledger: null }
+  if (known !== undefined && from.size === size) {
+    return known.ledger
+  }
   try {
     const ran = await $.process.run(
-      ['sh', '-c', `grep -a -E "$0" "$1" | cut -c 1-${LEDGER_LINE_CHARS}`, LEDGER_LINES, path],
+      [
+        'sh',
+        '-c',
+        `tail -c +$(($2 + 1)) "$1" | head -c $(($3 - $2)) | grep -a -E "$0" | cut -c 1-${LEDGER_LINE_CHARS}`,
+        LEDGER_LINES,
+        path,
+        String(from.size),
+        String(size),
+      ],
       { timeoutMs: 10_000 },
     )
+    if (ran.exitCode !== 0) {
+      return known?.ledger ?? null
+    }
+    const ledger = ledgerOf(ran.stdout, from.ledger)
+    ledgers.set(path, { size, ledger })
 
-    return ran.exitCode === 0 ? ledgerOf(ran.stdout) : null
+    return ledger
   } catch {
-    return null
+    return known?.ledger ?? null
   }
 }
 
@@ -804,10 +841,9 @@ const scan = async ($: EngineInterface): Promise<void> => {
         const fresh = await tailOf($, file.path, file.size, file.mtime * 1000)
         if (fresh !== null) {
           const tail = await withStart($, file.path, fresh)
-          // Only a finished turn is asked what it left running: the tail's own, or the one a
-          // prompt not yet sent stands after.
-          const isEnded = tail.last?.kind === 'end' || tail.unsent?.last?.kind === 'end'
-          const ledger = isEnded ? await ledgerIn($, file.path) : null
+          // What it has running in the background: after a finished turn, what keeps the session
+          // from done; beside a turn under way, counted on its card.
+          const ledger = await ledgerIn($, file.path, file.size)
           hit = {
             mtime: file.mtime,
             size: file.size,
@@ -1008,13 +1044,32 @@ export const register: Register = on => {
       name: 'board',
       description: 'Open the pane that lists every recent Claude Code session and its state',
     })
-    void $.ui.open({ id: PANE, title: TITLE })
+    isBoard = true
+    // A session the app shows nothing of yet (one reloaded while out of view) opens the pane
+    // when a surface attaches, rather than ask for it with nowhere to draw it. Where the
+    // surfaces cannot be read, it asks as before.
+    const surfaces = await $.session.surfaces().catch(() => null)
+    if (surfaces === null || surfaces.length > 0) {
+      isOpened = true
+      void $.ui.open({ id: PANE, title: TITLE })
+    }
     await sweep($)
     await seed($)
     await scan($)
     $.clock.every(SCAN_MS, () => {
       void scan($)
     })
+
+    return next(e)
+  })
+
+  // The first surface to attach to a board's session opens its pane, once: a pane the person
+  // closed stays closed as other surfaces come and go.
+  on('session.attach', async ($, e, next) => {
+    if (isBoard && !isOpened) {
+      isOpened = true
+      void $.ui.open({ id: PANE, title: TITLE })
+    }
 
     return next(e)
   })
@@ -1158,9 +1213,9 @@ export const register: Register = on => {
       )
     }
     // A one-line row, its mark and text, with its buttons beside it where the text keeps its
-    // room, else beneath it, flush right.
-    const lineOf = (row: Row, line: RenderElement) =>
-      1 + TEXT_CELLS * fit.scale + 2 * fit.gap + actionsAcross(row) <= e.props.bodyColumns ? (
+    // room (the pane's, or a box's within it), else beneath it, flush right.
+    const lineOf = (row: Row, line: RenderElement, room = e.props.bodyColumns) =>
+      1 + TEXT_CELLS * fit.scale + 2 * fit.gap + actionsAcross(row) <= room ? (
         <Box key={`row:${row.id}`} justifyContent="space-between" alignItems="center" columnGap="sm">
           {line}
           {actions(row, true)}
@@ -1171,7 +1226,22 @@ export const register: Register = on => {
           <Box justifyContent="flex-end">{actions(row, true)}</Box>
         </Box>
       )
-    const card = (row: Row) => {
+    // The rounded box a card is drawn in: one session's, or a family's, each member in turn, close.
+    const frame = (key: string, members: RenderElement[]) => (
+      <Box
+        key={key}
+        flexDirection="column"
+        rowGap="xs"
+        borderStyle="round"
+        borderDimColor
+        paddingX="sm"
+        paddingY="xs"
+      >
+        {members}
+      </Box>
+    )
+    // What a card says of one session, without its box.
+    const cardBody = (row: Row) => {
       const color = isUnseen(row) ? GREEN : LOOK[row.state].color
       const elapsed = now - startOf(row)
       const gauge = gaugeOf(elapsed)
@@ -1184,14 +1254,7 @@ export const register: Register = on => {
         e.props.bodyColumns
 
       return (
-        <Box
-          key={`row:${row.id}`}
-          flexDirection="column"
-          borderStyle="round"
-          borderDimColor
-          paddingX="sm"
-          paddingY="xs"
-        >
+        <Box key={`row:${row.id}`} flexDirection="column">
           <Box justifyContent="space-between" alignItems="center" columnGap="sm">
             {/* Narrowed, the label gives way first and ends in an ellipsis; the time and the
                 button stay whole. */}
@@ -1239,23 +1302,30 @@ export const register: Register = on => {
         </Box>
       )
     }
+    const card = (row: Row) => frame(`card:${row.id}`, [cardBody(row)])
 
-    // A starter that only waits on the sessions it started: one line, cut at its end, the title
-    // staying longest, then what it waits on.
-    const standingLine = (row: Row) =>
+    // A session in one line, cut at its end: the title stays longest, then what it is doing and
+    // for how long.
+    const oneLine = (row: Row, mark: string, color: string | undefined, isDim: boolean, room?: number) =>
       lineOf(
         row,
         <Box columnGap="sm" flexGrow={1} flexShrink={1} minWidth={0}>
-          <Text color={BLUE} dimColor mono>
-            {LOOK.background.mark}
+          <Text color={color} dimColor={isDim} mono>
+            {mark}
           </Text>
           <Box flexShrink={1} minWidth={0}>
-            <Text dimColor size="footnote" wrap="truncate-end">
+            <Text dimColor={isDim} size="footnote" wrap="truncate-end">
               {`${row.title === '' ? '(제목 없음)' : row.title} · ${labelOf(row)} · ${ago(now - startOf(row))}째`}
             </Text>
           </Box>
         </Box>,
+        room,
       )
+    // A starter that only waits on the sessions it started.
+    const standingLine = (row: Row, room?: number) => oneLine(row, LOOK.background.mark, BLUE, true, room)
+    // One of several sessions a family's starter sent out.
+    const memberLine = (row: Row, room: number) =>
+      oneLine(row, markOf(row, now), isUnseen(row) ? GREEN : LOOK[row.state].color, false, room)
 
     const tree = (
       <Box flexDirection="column" rowGap="md">
@@ -1300,16 +1370,27 @@ export const register: Register = on => {
         {busy.length > 0 && (
           <Box flexDirection="column" rowGap="sm">
             {section('작전 중')}
+            {/* A family shares one box: a starter that only waits is its line, at the foot. One
+                that waits alone, its sessions elsewhere on the board, stays a line of its own.
+                With more than one session under a starter, each is one line too, so a starter
+                that sent out six keeps a box no taller than a list of them; a starter at work
+                itself still leads with its own card. */}
             {familiesOf([...working, ...standing]).map(({ lead, members }) => {
-              const drawn = members.map(row => (isStandingBy(row) ? standingLine(row) : card(row)))
+              if (members.length === 1 && isStandingBy(lead)) {
+                return standingLine(lead)
+              }
+              const room = e.props.bodyColumns - fit.frame
+              const isCrowded = members.length > 2
 
-              // A family keeps closer together than the sessions around it.
-              return members.length === 1 ? (
-                drawn[0]
-              ) : (
-                <Box key={`family:${lead.id}`} flexDirection="column" rowGap="xs">
-                  {drawn}
-                </Box>
+              return frame(
+                `family:${lead.id}`,
+                members.map(row =>
+                  isStandingBy(row)
+                    ? standingLine(row, room)
+                    : isCrowded && row !== lead
+                      ? memberLine(row, room)
+                      : cardBody(row),
+                ),
               )
             })}
           </Box>

@@ -320,11 +320,12 @@ const noticeOf = (entry: Record<string, unknown>): string | null => {
 
 /**
  * Reads, from a transcript's ledger lines, each background task it started (a shell command, a
- * monitor, an async subagent) and has not been notified the end of, and a wakeup not yet due.
+ * monitor, an async subagent) and has not been notified the end of, and a wakeup not yet due;
+ * given the ledger of the lines before them, carries it on.
  */
-export const ledgerOf = (source: string): Ledger => {
-  const tasks = new Map<string, Task>()
-  let wake: Ledger['wake'] = null
+export const ledgerOf = (source: string, from: Ledger | null = null): Ledger => {
+  const tasks = new Map<string, Task>(from?.tasks)
+  let wake: Ledger['wake'] = from?.wake ?? null
   for (const line of source.split('\n')) {
     let entry: Record<string, unknown>
     try {
