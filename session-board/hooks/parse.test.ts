@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { Row, RowState } from '../types'
 import {
+  LEDGER_LINES,
   ago,
   findHome,
   ledgerOf,
@@ -454,6 +455,42 @@ test('a ledger keeps each background task until its notice, a stop or its expiry
   expect(pendingOf(ledger, AT + 2000 + 900_000 + 120_001)?.monitors).toBe(0)
   // Work never heard of again is let go after hours.
   expect(pendingOf(ledger, AT + 5 * 3600_000)).toBeNull()
+})
+
+test('a subagent sent back to work by a message is at work again until the end of that run', () => {
+  const resumed = {
+    type: 'user',
+    timestamp: stampAt(120),
+    message: { content: [{ type: 'tool_result', content: 'Resuming agent a1' }] },
+    toolUseResult: { success: true, message: 'Resuming agent a1', resumedAgentId: 'a1', revivedAgentId: 'a1' },
+  }
+  const ended = (seconds: number) => ({
+    type: 'queue-operation',
+    operation: 'enqueue',
+    timestamp: stampAt(seconds),
+    content: notice('a1', '<tool-use-id>t</tool-use-id>\n<output-file>/o</output-file>\n<status>completed</status>'),
+  })
+  const before = [started(0, { isAsync: true, status: 'async_launched', agentId: 'a1' }), ended(60)]
+  // The grep that feeds the ledger keeps the line that resumes it.
+  expect(new RegExp(LEDGER_LINES).test(JSON.stringify(resumed))).toBe(true)
+  expect(ledgerOf(lines(...before)).tasks.size).toBe(0)
+
+  // Resumed, it counts again from the message; the first run's notice, written late under its
+  // own time, does not end the second.
+  const again = ledgerOf(lines(...before, resumed, ended(60)))
+  expect(pendingOf(again, AT + 180_000)).toEqual({
+    shells: 0,
+    monitors: 0,
+    agents: 1,
+    sessions: 0,
+    wake: null,
+    since: AT + 120_000,
+  })
+  // Read on from where the last read stopped, its own end lets it go.
+  expect(ledgerOf(lines(ended(300)), again).tasks.size).toBe(0)
+  // A message that could not resume it sends nothing back to work.
+  const failed = { ...resumed, toolUseResult: { success: false, resumedAgentId: 'a1' } }
+  expect(ledgerOf(lines(...before, failed)).tasks.size).toBe(0)
 })
 
 test('a scheduled wakeup is pending until the turn it begins', () => {

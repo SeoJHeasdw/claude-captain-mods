@@ -863,11 +863,18 @@ const boardOver = async (
       case 'grep':
         return ran(`/home/me/Library/Application Support/Claude/claude-code-sessions/a/b/local_9.json\n`)
       case 'sh': {
-        // The ledger's grep: every line written from where the last read stopped to the size
-        // listed, the ones it does not want ignored.
+        // The ledger's grep: the lines written from where the last read stopped to the size
+        // listed, those its pattern keeps.
         const [from = 0, to = text.length] = e.argv.slice(5).map(Number)
+        const pattern = new RegExp(String(e.argv[3]))
 
-        return ran(text.slice(from, to))
+        return ran(
+          text
+            .slice(from, to)
+            .split('\n')
+            .filter(line => pattern.test(line))
+            .join('\n'),
+        )
       }
       default:
         commands.push([...e.argv])
@@ -1720,4 +1727,59 @@ test('a starter with several sessions out keeps one box, each of them one line i
   const rows = (box?.children ?? []).map(child => keysIn(child)[0])
   expect(rows.slice(0, 3).sort()).toEqual(sent.map(id => `row:${id}`).sort())
   expect(rows[3]).toBe(`row:${HARBOR}`)
+})
+
+test('a session that sent a subagent back to work and ended its turn waits on it, and is not back', async (...harness) => {
+  const notice = (stamp: string) => ({
+    type: 'queue-operation',
+    operation: 'enqueue',
+    timestamp: stamp,
+    content: '<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>t1</tool-use-id>\n<status>completed</status>\n</task-notification>',
+  })
+  const world = {
+    processes: '',
+    entries: [
+      { type: 'ai-title', aiTitle: '1040~1148 리뷰 피드백' },
+      { type: 'user', timestamp: '2026-10-13T07:30:00.000Z', turnOrigin: 'human', message: { content: '작가에게 맡겨줘' }, ...CODE },
+      {
+        type: 'user',
+        timestamp: '2026-10-13T07:30:10.000Z',
+        ...CODE,
+        message: { content: [{ type: 'tool_result', content: 'Async agent launched successfully.' }] },
+        toolUseResult: { isAsync: true, status: 'async_launched', agentId: 'a1' },
+      },
+      notice('2026-10-13T07:35:00.000Z'),
+      // The session reads the report and sends the writer back with a message.
+      {
+        type: 'user',
+        timestamp: '2026-10-13T07:39:00.000Z',
+        ...CODE,
+        message: { content: [{ type: 'tool_result', content: '{"success":true,"message":"Resuming agent a1"}' }] },
+        toolUseResult: { success: true, message: 'Resuming agent a1', resumedAgentId: 'a1', revivedAgentId: 'a1' },
+      },
+      { ...ended('2026-10-13T07:39:30.000Z', '작가에게 재작업을 맡겼습니다'), ...CODE },
+    ] as object[],
+  }
+  const board = await boardOver(harness, STUDIO_PATH, NOW, world)
+  for (let scan = 0; scan < 4; scan += 1) {
+    await board.clock.advance(5000)
+  }
+  const waiting = await board.texts()
+  expect(waiting.some(text => /정찰대 기다리는 중 · 에이전트 1$/.test(text))).toBe(true)
+  expect(waiting.some(text => /^(── )?복귀 완료/.test(text))).toBe(false)
+  expect(board.banners()).toEqual([])
+
+  // The writer reports again; the session reads it and ends its turn: now it is back, and said so.
+  world.entries.push(notice('2026-10-13T07:41:30.000Z'), {
+    type: 'user',
+    timestamp: '2026-10-13T07:41:31.000Z',
+    turnOrigin: 'task_notification',
+    ...CODE,
+    message: { content: '<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>' },
+  }, { ...ended('2026-10-13T07:41:40.000Z', '재작업이 끝났습니다'), ...CODE })
+  for (let scan = 0; scan < 4; scan += 1) {
+    await board.clock.advance(5000)
+  }
+  expect((await board.texts()).some(text => /정찰대 기다리는 중/.test(text))).toBe(false)
+  expect(board.banners().map(command => command[2])).toEqual(['✓ studio-agent 임무 완료'])
 })

@@ -265,7 +265,13 @@ export const tailAt = (tail: Tail, now: number): Tail =>
     ? { ...tail, last: tail.unsent.last, since: tail.unsent.since, unsent: null }
     : tail
 
-export type Task = { kind: 'shell' | 'monitor' | 'agent'; at: number; until: number }
+export type Task = {
+  kind: 'shell' | 'monitor' | 'agent'
+  at: number
+  until: number
+  /** A subagent sent back to work by a message after it reported: its run began at `at`. */
+  isResumed?: true
+}
 
 /** The background work a session started and has not heard the end of. */
 export type Ledger = {
@@ -275,11 +281,11 @@ export type Ledger = {
 }
 
 /**
- * The lines of a transcript a ledger is read from: a background start, a task's notice, a stop.
- * A pattern for `grep -E`, so the whole transcript need not be read.
+ * The lines of a transcript a ledger is read from: a background start, a subagent resumed, a
+ * task's notice, a stop. A pattern for `grep -E`, so the whole transcript need not be read.
  */
 export const LEDGER_LINES =
-  '"backgroundTaskId":"|"taskId":"|"isAsync":true|"scheduledFor":|task-notification|"task_id":"'
+  '"backgroundTaskId":"|"taskId":"|"isAsync":true|"resumedAgentId":"|"scheduledFor":|task-notification|"task_id":"'
 
 // A notice that a task has ended: a status other than running, or a monitor's expiry.
 const ENDED = new RegExp(
@@ -354,6 +360,12 @@ export const ledgerOf = (source: string, from: Ledger | null = null): Ledger => 
       if (agent !== null) {
         tasks.set(agent, { kind: 'agent', at, until: at + TASK_MAX_MS })
       }
+      // A message to a subagent that had reported sends it back to work, in the background, and
+      // its end is noticed as its first was.
+      const resumed = r.success === false ? null : text(r.resumedAgentId)
+      if (resumed !== null) {
+        tasks.set(resumed, { kind: 'agent', at, until: at + TASK_MAX_MS, isResumed: true })
+      }
       if (typeof r.scheduledFor === 'number') {
         wake = { due: r.scheduledFor, at }
       }
@@ -363,7 +375,13 @@ export const ledgerOf = (source: string, from: Ledger | null = null): Ledger => 
       }
     }
     for (const match of (noticeOf(entry) ?? '').matchAll(ENDED)) {
-      tasks.delete(match[1] ?? '')
+      const id = match[1] ?? ''
+      // The transcript writes some notices late, under their own time: one stamped before a
+      // resumed run began is the end of the run before it.
+      const task = tasks.get(id)
+      if (task?.isResumed !== true || Number.isNaN(at) || at >= task.at) {
+        tasks.delete(id)
+      }
     }
     // The wakeup came: the turn it began is under way, or over.
     const isTurnStart = entry.type === 'user' && text(entry.turnOrigin) !== null
